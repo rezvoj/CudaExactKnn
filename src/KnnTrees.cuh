@@ -22,6 +22,20 @@ namespace KnnTrees {
             std::runtime_error(cudaGetErrorString(error)) {}
     };
 
+    template <uint Dims>
+    struct IndexPoint {
+        int index;
+        KnnTrees::Array<float, Dims> point;
+    };
+
+    template <uint Dims>
+    struct BallNode {
+        KnnTrees::Array<float, Dims> leftCentroid;
+        float leftRadius;
+        KnnTrees::Array<float, Dims> rightCentroid;
+        float rightRadius;
+    };
+
     template <typename Type>
     __forceinline__ __host__ __device__
     void swap(Type& first, Type& second) {
