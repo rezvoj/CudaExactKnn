@@ -102,4 +102,35 @@ namespace KnnTrees {
         return (idx - 1) / 2;
     }
 
+    __forceinline__ __host__ __device__
+    uint64_t encodeUintUFloat(const uint integer, const float unsignedFloat) {
+        union {float input; uint output;} floatAsUint;
+        floatAsUint.input = unsignedFloat;
+        return (static_cast<uint64_t>(integer) << 32) | static_cast<uint64_t>(floatAsUint.output);
+    }
+
+    __forceinline__ __host__ __device__
+    uint64_t encodeUintSFloat(const uint integer, const float signedFloat) {
+        union {float input; int output;} floatAsUint;
+        floatAsUint.input = signedFloat;
+        const uint mask = static_cast<uint32_t>(floatAsUint.output >> 31);
+        floatAsUint.output = (floatAsUint.output ^ mask) | ((!mask) << 31);
+        return (static_cast<uint64_t>(integer) << 32)
+            | static_cast<uint64_t>(static_cast<uint32_t>(floatAsUint.output));
+    }
+
+    __forceinline__ __host__ __device__
+    uint64_t encodeUFloatInt(const float unsignedFloat, const int integer) {
+        union {float input; uint output;} floatAsUint;
+        floatAsUint.input = unsignedFloat;
+        return (static_cast<uint64_t>(static_cast<uint32_t>(floatAsUint.output)) << 32)
+            | static_cast<uint64_t>(static_cast<uint32_t>(integer));
+    }
+
+    __forceinline__ __host__ __device__
+    float decodeEncoded1UFloat(const uint64_t value) {
+        const uint floatBits = static_cast<uint>(value >> 32);
+        return *reinterpret_cast<const float*>(&floatBits);
+    }
+
 };
