@@ -133,4 +133,49 @@ namespace KnnTrees {
         return *reinterpret_cast<const float*>(&floatBits);
     }
 
+    namespace Cuda {
+
+        constexpr cudaMemcpyKind H2D = cudaMemcpyHostToDevice;
+        constexpr cudaMemcpyKind D2H = cudaMemcpyDeviceToHost;
+        constexpr cudaMemcpyKind D2D = cudaMemcpyDeviceToDevice;
+
+        __forceinline__ 
+        void check(const cudaError_t error) {
+            if (error != cudaSuccess) {
+                throw KnnTrees::CudaException(error);
+            }
+        }
+
+        __forceinline__ 
+        uint blockCount(const uint threadCount, const uint blockSize) {
+            return (threadCount + blockSize - 1) / blockSize;
+        }
+
+        __forceinline__ 
+        void synchronizeStream(const cudaStream_t stream) {
+            check(cudaStreamSynchronize(stream));
+        }
+
+        template <uint Size>
+        __forceinline__ void synchronizeStreams(const cudaStream_t* streams) {
+            #pragma unroll
+            for (uint idx = 0; idx < Size; ++idx) {
+                check(cudaStreamSynchronize(streams[idx]));
+            }
+        }
+
+    }
+
+    template <typename Type>
+    Type* pinnedMalloc(const uint size) {
+        Type* pointer;
+        Cuda::check(cudaMallocHost(&pointer, sizeof(Type) * size));
+        return pointer;
+    }
+
+    template <typename Type>
+    void pinnedFree(Type* pointer) {
+        Cuda::check(cudaFreeHost(pointer));
+    }
+
 };
