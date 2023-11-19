@@ -133,6 +133,61 @@ namespace KnnTrees {
         return *reinterpret_cast<const float*>(&floatBits);
     }
 
+    template <uint K>
+    __forceinline__ __host__ __device__
+    float arrayConsider(
+            uint64_t* nearestNeighbours,
+            const int index,
+            const float distance2) {
+        uint64_t indexDistance = encodeUFloatInt(distance2, index);
+        if (indexDistance < nearestNeighbours[K - 1]) {
+            #pragma unroll
+            for (uint idx = 0; idx < K; ++idx) {
+                const uint64_t examinded = nearestNeighbours[idx];
+                nearestNeighbours[idx] = min(examinded, indexDistance);
+                indexDistance = max(examinded, indexDistance);
+            }
+        }
+        return decodeEncoded1UFloat(nearestNeighbours[K - 1]);
+    }
+
+    template <uint K>
+    __forceinline__ __host__ __device__
+    float heapConsider(
+            uint64_t* nearestNeighbours,
+            const int index,
+            const float distance2) {
+        uint64_t indexDistance = encodeUFloatInt(distance2, index);
+        if (indexDistance < nearestNeighbours[0]) {
+            uint heapIdx = 0;
+            while (true) {
+                uint leftChild = leftChildOf(heapIdx);
+                if (leftChild < K) {
+                    uint nextIdx = 0;
+                    const uint64_t leftVlaue = nearestNeighbours[leftChild];
+                    const uint64_t rightValue = nearestNeighbours[leftChild + 1];
+                    uint64_t largestValue = indexDistance;
+                    if (leftVlaue > largestValue) {
+                        nextIdx = leftChild;
+                        largestValue = leftVlaue;
+                    }
+                    if (leftChild + 1 < K && rightValue > largestValue) {
+                        nextIdx = leftChild + 1;
+                        largestValue = rightValue;
+                    }
+                    if (nextIdx) {
+                        nearestNeighbours[heapIdx] = nearestNeighbours[nextIdx];
+                        heapIdx = nextIdx;
+                        continue;
+                    }
+                }
+                nearestNeighbours[heapIdx] = indexDistance;
+                break;
+            }
+        }
+        return decodeEncoded1UFloat(nearestNeighbours[0]);
+    }
+
     namespace Cuda {
 
         constexpr cudaMemcpyKind H2D = cudaMemcpyHostToDevice;
@@ -165,6 +220,15 @@ namespace KnnTrees {
         }
 
     }
+
+    template <uint Dims, uint K>
+    struct Query {
+        const Array<float, Dims>* points;
+        const uint count;
+        const float maxDistance2;
+        Array<int, K>* rIndexes;
+        Array<float, K>* rDistances;
+    };
 
     template <typename Type>
     Type* pinnedMalloc(const uint size) {
