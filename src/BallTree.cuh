@@ -141,6 +141,101 @@ namespace KnnTrees {
             delete[] mIndexPoints;
         }
 
+    private:
+        template <uint K, bool HeapNN>
+        __forceinline__ 
+        float mConsider(
+                float maxDistance2,
+                uint64_t* nearestNeighbours,
+                const uint idx,
+                const Array<float, Dims>& point) const {
+            const uint idxIdx = mMaxChildren * (idx - mNodeSize);
+            for (uint offset = 0; offset < mMaxChildren; ++offset) {
+                const IndexPoint<Dims> indexPoint = mIndexPoints[idxIdx + offset];
+                if (indexPoint.index == -1) break;
+                float distance2 = calcDistance2<Dims>(point, indexPoint.point);
+                if constexpr (HeapNN) 
+                    maxDistance2 = heapConsider<K>(nearestNeighbours, indexPoint.index, distance2);
+                else 
+                    maxDistance2 = arrayConsider<K>(nearestNeighbours, indexPoint.index, distance2);
+            }
+            return maxDistance2;
+        }
+
+        template <uint K, bool HeapNN>
+        void mKnn(
+                uint64_t* nearestNeighbours, 
+                const Array<float, Dims>& point, 
+                float maxDistance2) const {
+            constexpr uint STACK_SIZE = sizeof(uint) * 8;
+            uint indexStack[STACK_SIZE];
+            float distanceStack[STACK_SIZE];
+            uint stackSize = 1;
+            indexStack[0] = 0; 
+            distanceStack[0] = 0.0f;
+            while (stackSize) {
+                if (distanceStack[--stackSize] >= maxDistance2) continue;
+                uint nodeIdx = indexStack[stackSize];
+                bool skipNode = false;
+                while (nodeIdx < mNodeSize) {
+                    BallNode<Dims> node = mNodes[nodeIdx];
+                    const float leftDistance = std::sqrt(calcDistance2(node.leftCentroid, point));
+                    const float leftBorderDistance = leftDistance - node.leftRadius;
+                    const float leftBorderPositiveDistance = max(leftBorderDistance, 0.0f);
+                    const float leftBorderDistance2 = leftBorderPositiveDistance * leftBorderPositiveDistance;
+                    const float rightDistance = std::sqrt(calcDistance2(node.rightCentroid, point));
+                    const float rightBorderDistance = rightDistance - node.rightRadius;
+                    const float rightBorderPositiveDistance = max(rightBorderDistance, 0.0f);
+                    const float rightBorderDistance2 = rightBorderPositiveDistance * rightBorderPositiveDistance;
+                    uint closeChild, farChild;
+                    float closeBorderDistance2, farBorderDistance2;
+                    const uint leftChild = leftChildOf(nodeIdx);
+                    if (leftBorderDistance < rightBorderDistance) {
+                        closeChild = leftChild;
+                        closeBorderDistance2 = leftBorderDistance2;
+                        farChild = leftChild + 1;
+                        farBorderDistance2 = rightBorderDistance2;
+                    }
+                    else {
+                        farChild = leftChild;
+                        farBorderDistance2 = leftBorderDistance2;
+                        closeChild = leftChild + 1;
+                        closeBorderDistance2 = rightBorderDistance2;
+                    }
+                    if (closeBorderDistance2 >= maxDistance2) {
+                        skipNode = true;
+                        break;
+                    }
+                    if (farBorderDistance2 < maxDistance2) {
+                        indexStack[stackSize] = farChild;
+                        distanceStack[stackSize] = farBorderDistance2;
+                        stackSize += 1;
+                    }
+                    nodeIdx = closeChild;
+                }
+                if (!skipNode) {
+                    maxDistance2 = mConsider<K, HeapNN>(
+                        maxDistance2, nearestNeighbours, nodeIdx, point
+                    );
+                }
+            }
+        }
+
+    public:
+        template <uint K, bool HeapNN>
+        void batchKnn(Query<Dims, K>& query) const {
+            uint64_t nearestNeighbours[K];
+            for (uint idx = 0; idx < query.count; ++idx) {
+                fillArray<uint64_t, K>(nearestNeighbours, encodeUFloatInt(query.maxDistance2, -1));
+                mKnn<K, HeapNN>(nearestNeighbours, query.points[idx], query.maxDistance2);
+                for (uint i = 0; i < K; ++i) {
+                    const uint64_t neighbour = nearestNeighbours[i];
+                    query.rIndexes[idx][i] = static_cast<int>(neighbour);
+                    query.rDistances[idx][i] = decodeEncoded1UFloat(neighbour);
+                }
+            }
+        }
+
     };
 
 }
