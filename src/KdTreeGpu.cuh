@@ -10,6 +10,179 @@ namespace KnnTrees {
 
     namespace KdTreeKernels {
 
+        template <uint Dims, uint K, bool HeapNN>
+        __forceinline__ __device__
+        float considerPointDevice(
+                const uint idx,
+                float maxDistance2,
+                uint64_t* nearestNeighbours,
+                const uint nodeIdx, 
+                const Array<float, Dims>& point,
+                const uint nodeSize,
+                const uint maxChildren,
+                const IndexPoint<Dims>* indexPoints) {
+            const uint idxIdx = maxChildren * (nodeIdx - nodeSize); 
+            for (uint offset = 0; offset < maxChildren; ++offset) {
+                const IndexPoint<Dims> indexPoint = indexPoints[idxIdx + offset];
+                if (indexPoint.index == -1) break;
+                float distance2 = calcDistance2<Dims>(point, indexPoint.point);
+                if (HeapNN) 
+                    maxDistance2 = heapConsider<K>(nearestNeighbours, indexPoint.index, distance2);
+                else 
+                    maxDistance2 = arrayConsider<K>(nearestNeighbours, indexPoint.index, distance2);
+            }
+            return maxDistance2;
+        }
+ 
+        template <uint Dims, uint AuxDims, uint K, bool HeapNN>
+        __forceinline__ __device__
+        void knnDevice(
+                const uint idx, 
+                uint64_t* nearestNeighbours,
+                uint* indexStack,
+                float* distanceStack,
+                Query<Dims, K>& query,
+                const uint maxChildren,
+                const uint nodeSize,
+                const float* nodes,
+                const IndexPoint<Dims>* indexPoints) {
+            float maxDistance2 = query.maxDistance2;
+            fillArray<uint64_t, K>(nearestNeighbours, encodeUFloatInt(maxDistance2, -1));
+            const Array<float, Dims> point = query.points[idx];
+            indexStack[0] = 0; distanceStack[0] = 0.0f;
+            uint stackSize = 1;
+            while (stackSize) {
+                if (distanceStack[--stackSize] >= maxDistance2) continue;
+                uint nodeIdx = indexStack[stackSize];
+                uint currDim = (log2Ceil(nodeIdx + 2) - 1) % AuxDims;
+                while (nodeIdx < nodeSize) {
+                    uint closeChild, farChild;
+                    const float distance = point[currDim] - nodes[nodeIdx];
+                    const uint leftChild = leftChildOf(nodeIdx);
+                    if (distance < 0.0f) {
+                        closeChild = leftChild;
+                        farChild = leftChild + 1;
+                    }
+                    else {
+                        farChild = leftChild;
+                        closeChild = leftChild + 1;
+                    }
+                    const float distance2 = distance * distance;
+                    if (distance2 < maxDistance2) {
+                        indexStack[stackSize] = farChild;
+                        distanceStack[stackSize] = distance2;
+                        stackSize += 1;
+                    }
+                    nodeIdx = closeChild;
+                    currDim = (currDim + 1) % AuxDims;
+                } 
+                maxDistance2 = considerPointDevice<Dims, K, HeapNN>(
+                    idx, maxDistance2, nearestNeighbours, nodeIdx, point,
+                    nodeSize, maxChildren, indexPoints
+                );
+            }
+            #pragma unroll
+            for (uint i = 0; i < K; ++i) {
+                const uint64_t neighbour = nearestNeighbours[i];
+                query.rIndexes[idx][i] = static_cast<int>(neighbour);
+                query.rDistances[idx][i] = decodeEncoded1UFloat(neighbour);
+            }
+        }
+
+        template <uint Dims, uint AuxDims, uint K, uint BlockSize, bool HeapNN> 
+        __global__
+        void knnKernelShSh(
+                Query<Dims, K> query,
+                const uint maxChildren,
+                const uint nodeSize,
+                const float* nodes,
+                const IndexPoint<Dims>* indexPoints) {
+            const uint idx = blockIdx.x * blockDim.x + threadIdx.x;
+            if (idx >= query.count) return;
+            constexpr uint STACK_SIZE = sizeof(uint) * 8;
+            __shared__ uint sIndexStack[BlockSize * STACK_SIZE];
+            __shared__ float sDistanceStack[BlockSize * STACK_SIZE];
+            uint* indexStack = sIndexStack + threadIdx.x * STACK_SIZE;
+            float* distanceStack = sDistanceStack + threadIdx.x * STACK_SIZE;
+            __shared__ uint64_t sNearestNeighbours[BlockSize * K];
+            uint64_t* nearestNeighbours = sNearestNeighbours + threadIdx.x * K;
+            knnDevice<Dims, AuxDims, K, HeapNN>(
+                idx, nearestNeighbours, 
+                indexStack, distanceStack,
+                query, maxChildren, nodeSize,
+                nodes, indexPoints
+            );
+        }
+
+        template <uint Dims, uint AuxDims, uint K, uint BlockSize, bool HeapNN> 
+        __global__
+        void knnKernelNshSh(
+                Query<Dims, K> query,
+                const uint maxChildren,
+                const uint nodeSize,
+                const float* nodes,
+                const IndexPoint<Dims>* indexPoints) {
+            const uint idx = blockIdx.x * blockDim.x + threadIdx.x;
+            if (idx >= query.count) return;
+            constexpr uint STACK_SIZE = sizeof(uint) * 8;
+            __shared__ uint sIndexStack[BlockSize * STACK_SIZE];
+            __shared__ float sDistanceStack[BlockSize * STACK_SIZE];
+            uint* indexStack = sIndexStack + threadIdx.x * STACK_SIZE;
+            float* distanceStack = sDistanceStack + threadIdx.x * STACK_SIZE;
+            uint64_t nearestNeighbours[K];
+            knnDevice<Dims, AuxDims, K, HeapNN>(
+                idx, nearestNeighbours, 
+                indexStack, distanceStack,
+                query, maxChildren, nodeSize,
+                nodes, indexPoints
+            );
+        }
+
+        template <uint Dims, uint AuxDims, uint K, uint BlockSize, bool HeapNN> 
+        __global__
+        void knnKernelShNsh(
+                Query<Dims, K> query,
+                const uint maxChildren,
+                const uint nodeSize,
+                const float* nodes,
+                const IndexPoint<Dims>* indexPoints) {
+            const uint idx = blockIdx.x * blockDim.x + threadIdx.x;
+            if (idx >= query.count) return;
+            constexpr uint STACK_SIZE = sizeof(uint) * 8;
+            uint indexStack[STACK_SIZE];
+            float distanceStack[STACK_SIZE];
+            __shared__ uint64_t sNearestNeighbours[BlockSize * K];
+            uint64_t* nearestNeighbours = sNearestNeighbours + threadIdx.x * K;
+            knnDevice<Dims, AuxDims, K, HeapNN>(
+                idx, nearestNeighbours, 
+                indexStack, distanceStack,
+                query, maxChildren, nodeSize,
+                nodes, indexPoints
+            );
+        }
+
+        template <uint Dims, uint AuxDims, uint K, uint BlockSize, bool HeapNN> 
+        __global__
+        void knnKernelNshNsh(
+                Query<Dims, K> query,
+                const uint maxChildren,
+                const uint nodeSize,
+                const float* nodes,
+                const IndexPoint<Dims>* indexPoints) {
+            const uint idx = blockIdx.x * blockDim.x + threadIdx.x;
+            if (idx >= query.count) return;
+            constexpr uint STACK_SIZE = sizeof(uint) * 8;
+            uint indexStack[STACK_SIZE];
+            float distanceStack[STACK_SIZE];
+            uint64_t nearestNeighbours[K];
+            knnDevice<Dims, AuxDims, K, HeapNN>(
+                idx, nearestNeighbours, 
+                indexStack, distanceStack,
+                query, maxChildren, nodeSize,
+                nodes, indexPoints
+            );
+        }
+
         __global__
         void iotaKernel(int* indexes, uint size) {
             const uint idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -214,6 +387,26 @@ namespace KnnTrees {
         ~KdTreeGpu() {
             cudaFree(mDNodes);
             cudaFree(mDIndexPoints);
+        }
+
+    public:
+        template <uint K, uint BlockSize, bool HeapNN, bool SharedMemNN, bool SharedMemStack>
+        void batchKnn(Query<Dims, K>& query) const {
+            const uint blockCount = Cuda::blockCount(query.count, BlockSize);
+            if constexpr (SharedMemNN && SharedMemStack)
+                KdTreeKernels::knnKernelShSh<Dims, AuxDims, K, BlockSize, HeapNN>
+                    <<<blockCount, BlockSize>>>(query, mMaxChildren, mNodeSize, mDNodes, mDIndexPoints);
+            else if constexpr (!SharedMemNN && SharedMemStack)
+                KdTreeKernels::knnKernelNshSh<Dims, AuxDims, K, BlockSize, HeapNN>
+                    <<<blockCount, BlockSize>>>(query, mMaxChildren, mNodeSize, mDNodes, mDIndexPoints);
+            else if constexpr (SharedMemNN && !SharedMemStack)
+                KdTreeKernels::knnKernelShNsh<Dims, AuxDims, K, BlockSize, HeapNN>
+                    <<<blockCount, BlockSize>>>(query, mMaxChildren, mNodeSize, mDNodes, mDIndexPoints);
+            else if constexpr (!SharedMemNN && !SharedMemStack)
+                KdTreeKernels::knnKernelNshNsh<Dims, AuxDims, K, BlockSize, HeapNN>
+                    <<<blockCount, BlockSize>>>(query, mMaxChildren, mNodeSize, mDNodes, mDIndexPoints);
+            Cuda::check(cudaGetLastError());
+            Cuda::check(cudaDeviceSynchronize());
         }
 
     };
