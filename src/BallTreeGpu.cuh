@@ -10,6 +10,195 @@ namespace KnnTrees {
 
     namespace BallTreeKernels {
 
+        template <uint Dims, uint K, bool HeapNN>
+        __forceinline__ __device__
+        float considerPointDevice(
+                float maxDistance2,
+                uint64_t* nearestNeighbours,
+                const uint nodeIdx, 
+                const Array<float, Dims>& point,
+                const uint nodeSize,
+                const uint maxChildren,
+                const IndexPoint<Dims>* indexPoints) {
+            const uint idxIdx = maxChildren * (nodeIdx - nodeSize);
+            for (uint offset = 0; offset < maxChildren; ++offset) {
+                const IndexPoint<Dims> indexPoint = indexPoints[idxIdx + offset];
+                if (indexPoint.index == -1) break;
+                float distance2 = calcDistance2<Dims>(point, indexPoint.point);
+                if constexpr (HeapNN) 
+                    maxDistance2 = heapConsider<K>(nearestNeighbours, indexPoint.index, distance2);
+                else 
+                    maxDistance2 = arrayConsider<K>(nearestNeighbours, indexPoint.index, distance2);
+            }
+            return maxDistance2;
+        }
+
+        template <uint Dims, uint K, bool HeapNN>
+        __forceinline__ __device__
+        void knnDevice(
+                const uint idx,
+                uint64_t* nearestNeighbours,
+                uint* indexStack,
+                float* distanceStack,
+                Query<Dims, K>& query,
+                const uint maxChildren,
+                const uint nodeSize,
+                const BallNode<Dims>* nodes,
+                const IndexPoint<Dims>* indexPoints) {
+            float maxDistance2 = query.maxDistance2;
+            fillArray<uint64_t, K>(nearestNeighbours, encodeUFloatInt(maxDistance2, -1));
+            const Array<float, Dims> point = query.points[idx];
+            indexStack[0] = 0; distanceStack[0] = 0.0f;
+            uint stackSize = 1;
+            while (stackSize) {
+                if (distanceStack[--stackSize] >= maxDistance2) continue;
+                uint nodeIdx = indexStack[stackSize];
+                bool skipNode = false;
+                while (nodeIdx < nodeSize) {
+                    BallNode<Dims> node = nodes[nodeIdx];
+                    const float leftDistance = sqrt(calcDistance2(node.leftCentroid, point));
+                    const float leftBorderDistance = leftDistance - node.leftRadius;
+                    const float leftBorderPositiveDistance = max(leftBorderDistance, 0.0f);
+                    const float leftBorderDistance2 = leftBorderPositiveDistance * leftBorderPositiveDistance;
+                    const float rightDistance = sqrt(calcDistance2(node.rightCentroid, point));
+                    const float rightBorderDistance = rightDistance - node.rightRadius;
+                    const float rightBorderPositiveDistance = max(rightBorderDistance, 0.0f);
+                    const float rightBorderDistance2 = rightBorderPositiveDistance * rightBorderPositiveDistance;
+                    uint closeChild, farChild;
+                    float closeBorderDistance2, farBorderDistance2;
+                    const uint leftChild = leftChildOf(nodeIdx);
+                    if (leftBorderDistance < rightBorderDistance) {
+                        closeChild = leftChild;
+                        closeBorderDistance2 = leftBorderDistance2;
+                        farChild = leftChild + 1;
+                        farBorderDistance2 = rightBorderDistance2;
+                    }
+                    else {
+                        farChild = leftChild;
+                        farBorderDistance2 = leftBorderDistance2;
+                        closeChild = leftChild + 1;
+                        closeBorderDistance2 = rightBorderDistance2;
+                    }
+                    if (closeBorderDistance2 >= maxDistance2) {
+                        skipNode = true;
+                        break;
+                    }
+                    if (farBorderDistance2 < maxDistance2) {
+                        indexStack[stackSize] = farChild;
+                        distanceStack[stackSize] = farBorderDistance2;
+                        stackSize += 1;
+                    }
+                    nodeIdx = closeChild;
+                }
+                if (!skipNode) {
+                    maxDistance2 = considerPointDevice<Dims, K, HeapNN>(
+                        maxDistance2, nearestNeighbours, nodeIdx, point,
+                        nodeSize, maxChildren, indexPoints
+                    );
+                }
+            }
+            #pragma unroll
+            for (uint i = 0; i < K; ++i) {
+                const uint64_t neighbour = nearestNeighbours[i];
+                query.rIndexes[idx][i] = static_cast<int>(neighbour);
+                query.rDistances[idx][i] = decodeEncoded1UFloat(neighbour);
+            }
+        }
+
+        template <uint Dims, uint K, uint BlockSize, bool HeapNN> 
+        __global__
+        void knnKernelShSh(
+                Query<Dims, K> query,
+                const uint maxChildren,
+                const uint nodeSize,
+                const BallNode<Dims>* nodes,
+                const IndexPoint<Dims>* indexPoints) {
+            const uint idx = blockIdx.x * blockDim.x + threadIdx.x;
+            if (idx >= query.count) return;
+            constexpr uint STACK_SIZE = sizeof(uint) * 8;
+            __shared__ uint sIndexStack[BlockSize * STACK_SIZE];
+            __shared__ float sDistanceStack[BlockSize * STACK_SIZE];
+            uint* indexStack = sIndexStack + threadIdx.x * STACK_SIZE;
+            float* distanceStack = sDistanceStack + threadIdx.x * STACK_SIZE;
+            __shared__ uint64_t sNearestNeighbours[BlockSize * K];
+            uint64_t* nearestNeighbours = sNearestNeighbours + threadIdx.x * K;
+            knnDevice<Dims, K, HeapNN>(
+                idx, nearestNeighbours, 
+                indexStack, distanceStack,
+                query, maxChildren, nodeSize,
+                nodes, indexPoints
+            );
+        }
+
+        template <uint Dims, uint K, uint BlockSize, bool HeapNN> 
+        __global__
+        void knnKernelNshSh(
+                Query<Dims, K> query,
+                const uint maxChildren,
+                const uint nodeSize,
+                const BallNode<Dims>* nodes,
+                const IndexPoint<Dims>* indexPoints) {
+            const uint idx = blockIdx.x * blockDim.x + threadIdx.x;
+            if (idx >= query.count) return;
+            constexpr uint STACK_SIZE = sizeof(uint) * 8;
+            __shared__ uint sIndexStack[BlockSize * STACK_SIZE];
+            __shared__ float sDistanceStack[BlockSize * STACK_SIZE];
+            uint* indexStack = sIndexStack + threadIdx.x * STACK_SIZE;
+            float* distanceStack = sDistanceStack + threadIdx.x * STACK_SIZE;
+            uint64_t nearestNeighbours[K];
+            knnDevice<Dims, K, HeapNN>(
+                idx, nearestNeighbours, 
+                indexStack, distanceStack,
+                query, maxChildren, nodeSize,
+                nodes, indexPoints
+            );
+        }
+
+        template <uint Dims, uint K, uint BlockSize, bool HeapNN> 
+        __global__
+        void knnKernelShNsh(
+                Query<Dims, K> query,
+                const uint maxChildren,
+                const uint nodeSize,
+                const BallNode<Dims>* nodes,
+                const IndexPoint<Dims>* indexPoints) {
+            const uint idx = blockIdx.x * blockDim.x + threadIdx.x;
+            if (idx >= query.count) return;
+            constexpr uint STACK_SIZE = sizeof(uint) * 8;
+            uint indexStack[STACK_SIZE];
+            float distanceStack[STACK_SIZE];
+            __shared__ uint64_t sNearestNeighbours[BlockSize * K];
+            uint64_t* nearestNeighbours = sNearestNeighbours + threadIdx.x * K;
+            knnDevice<Dims, K, HeapNN>(
+                idx, nearestNeighbours, 
+                indexStack, distanceStack,
+                query, maxChildren, nodeSize,
+                nodes, indexPoints
+            );
+        }
+
+        template <uint Dims, uint K, uint BlockSize, bool HeapNN> 
+        __global__
+        void knnKernelNshNsh(
+                Query<Dims, K> query,
+                const uint maxChildren,
+                const uint nodeSize,
+                const BallNode<Dims>* nodes,
+                const IndexPoint<Dims>* indexPoints) {
+            const uint idx = blockIdx.x * blockDim.x + threadIdx.x;
+            if (idx >= query.count) return;
+            constexpr uint STACK_SIZE = sizeof(uint) * 8;
+            uint indexStack[STACK_SIZE];
+            float distanceStack[STACK_SIZE];
+            uint64_t nearestNeighbours[K];
+            knnDevice<Dims, K, HeapNN>(
+                idx, nearestNeighbours, 
+                indexStack, distanceStack,
+                query, maxChildren, nodeSize,
+                nodes, indexPoints
+            );
+        }
+
         __global__
         void iotaKernel(int* indexes, uint size) {
             const uint idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -437,6 +626,25 @@ namespace KnnTrees {
         ~BallTreeGpu() {
             cudaFree(mDNodes);
             cudaFree(mDIndexPoints);
+        }
+
+        template <uint K, uint BlockSize, bool HeapNN, bool SharedMemNN, bool SharedMemStack>
+        void batchKnn(Query<Dims, K>& query) const {
+            const uint blockCount = Cuda::blockCount(query.count, BlockSize);
+            if constexpr (SharedMemNN && SharedMemStack)
+                BallTreeKernels::knnKernelShSh<Dims, K, BlockSize, HeapNN>
+                    <<<blockCount, BlockSize>>>(query, mMaxChildren, mNodeSize, mDNodes, mDIndexPoints);
+            else if constexpr (!SharedMemNN && SharedMemStack)
+                BallTreeKernels::knnKernelNshSh<Dims, K, BlockSize, HeapNN>
+                    <<<blockCount, BlockSize>>>(query, mMaxChildren, mNodeSize, mDNodes, mDIndexPoints);
+            else if constexpr (SharedMemNN && !SharedMemStack)
+                BallTreeKernels::knnKernelShNsh<Dims, K, BlockSize, HeapNN>
+                    <<<blockCount, BlockSize>>>(query, mMaxChildren, mNodeSize, mDNodes, mDIndexPoints);
+            else if constexpr (!SharedMemNN && !SharedMemStack)
+                BallTreeKernels::knnKernelNshNsh<Dims, K, BlockSize, HeapNN>
+                    <<<blockCount, BlockSize>>>(query, mMaxChildren, mNodeSize, mDNodes, mDIndexPoints);
+            Cuda::check(cudaGetLastError());
+            Cuda::check(cudaDeviceSynchronize());
         }
 
     };
