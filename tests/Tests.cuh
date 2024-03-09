@@ -1,4 +1,5 @@
 #pragma once
+#include <sys/time.h>
 #include <set>
 #include <vector>
 #include <random>
@@ -66,6 +67,21 @@ uint checkQueryErrors(
     return errorCount;
 }
 
+timeval t1, t2;
+
+void startTime() {
+    KnnTrees::Cuda::check(cudaDeviceSynchronize());
+    gettimeofday(&t1, NULL);
+}
+
+double getTime() {
+    KnnTrees::Cuda::check(cudaDeviceSynchronize());
+    gettimeofday(&t2, NULL);
+    double t = (t2.tv_sec - t1.tv_sec) * 1000.0;
+    t += (t2.tv_usec - t1.tv_usec) / 1000.0;
+    return t;
+}
+
 template <uint Dims>
 void generateRandomPoints(
         KnnTrees::Array<float, Dims>* points, 
@@ -79,4 +95,14 @@ void generateRandomPoints(
             points[i][j] = dist(gen);
         }
     }
+}
+
+template<typename F, size_t... Is>
+constexpr void forSequence(F&& func, std::index_sequence<Is...>) {
+    (func(std::integral_constant<size_t, Is>{}), ...);
+}
+
+template<size_t N, typename F>
+constexpr void forLoop(F&& func) {
+    forSequence(std::forward<F>(func), std::make_index_sequence<N>{});
 }
