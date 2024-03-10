@@ -3,3 +3,4 @@
 *.so
 FunctionalityTests
 SpeedupSpeedTests
+ConstructionSpeedTests

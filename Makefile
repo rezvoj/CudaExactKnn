@@ -5,3 +5,6 @@ FunctionalityTests:
 
 SpeedupSpeedTests:
 	nvcc $(NVCC_FLAGS) -o SpeedupSpeedTests tests/SpeedupSpeedTests.cu
+
+ConstructionSpeedTests:
+	nvcc $(NVCC_FLAGS) -o ConstructionSpeedTests tests/ConstructionSpeedTests.cu
