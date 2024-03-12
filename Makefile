@@ -8,3 +8,6 @@ SpeedupSpeedTests:
 
 ConstructionSpeedTests:
 	nvcc $(NVCC_FLAGS) -o ConstructionSpeedTests tests/ConstructionSpeedTests.cu
+
+Dim3SpeedTests:
+	nvcc $(NVCC_FLAGS) -o Dim3SpeedTests tests/Dim3SpeedTests.cu
