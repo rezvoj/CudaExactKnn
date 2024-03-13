@@ -11,3 +11,6 @@ ConstructionSpeedTests:
 
 Dim3SpeedTests:
 	nvcc $(NVCC_FLAGS) -o Dim3SpeedTests tests/Dim3SpeedTests.cu
+
+DimXSpeedTests:
+	nvcc $(NVCC_FLAGS) -o DimXSpeedTests tests/DimXSpeedTests.cu
