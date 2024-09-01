@@ -24,6 +24,8 @@ Development on this project is on hold until I have access to a PC with a CUDA-e
 
 ## Usage
 
+A brief showing of the current api. 
+
 ### Construction of the Simple Data Structures
 
 ##### Brute Force:
